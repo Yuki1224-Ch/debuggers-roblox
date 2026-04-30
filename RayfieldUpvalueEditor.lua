@@ -1,534 +1,221 @@
--- Rayfield UI - Optimized Upvalue Editor with Deep Search & Code Spy
--- Fully optimized with no lag, real-time editing, and deep function inspection
+-- ============================================================================
+-- RAYFIELD OPTIMIZED UPVALUE EDITOR & CODE SPY (V2.0)
+-- Features: Deep Search, Real Editing, Code Spy, Copy/Export, No-Lag Architecture
+-- ============================================================================
 
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
-local Workspace = game:GetService("Workspace")
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
-local RunService = game:GetService("RunService")
+local RayfieldLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/RayfieldMain/RayfieldLibrary/main/source.lua"))()
+local Window = RayfieldLib:CreateWindow({
+    Name = "Upvalue Editor & Code Spy",
+    LoadingTitle = "Rayfield Tools",
+    Theme = "Dark",
+    Icon = "Icon"
+})
 
--- Optimized caching system
-local Cache = {
-    Functions = {},
-    Upvalues = {},
-    Scripts = {}
-}
+local MainTab = Window:CreateTab("Main", "Home")
+local CodeSpyTab = Window:CreateTab("Code Spy", "FileCode")
+local ExportTab = Window:CreateTab("Export/Generate", "Save")
 
--- Performance optimization settings
-local OptimizationSettings = {
-    MaxCachedItems = 500,
-    RefreshRate = 0.1,
-    LazyLoading = true,
-    Debounce = false
-}
+local CONFIG = {MaxDepth = 15, CacheLimit = 1000, DebounceTime = 0.5, AutoGC = true, WeakCache = true}
+local scannedFunctions, cache, cacheCount = {}, {}, 0
+local isScanning, selectedFunction, clipboardBuffer = false, nil, ""
 
--- Utility functions for performance
-local function SafePCall(func, ...)
-    local success, result = pcall(func, ...)
-    return success and result or nil
+local function SafeGC() if CONFIG.AutoGC then collectgarbage("step") end end
+
+local function GetTypeString(value)
+    local t = type(value)
+    if t == "table" then return "Table (" .. tostring(#value) .. " items)"
+    elseif t == "function" then local info = debug.getinfo(value, "nS"); return "Function: " .. (info.name or "anonymous") .. " [" .. (info.short_src or "?") .. ":" .. (info.linedefined or "?") .. "]"
+    elseif t == "string" then local str = tostring(value); return "String: \"" .. str:sub(1, 50) .. (str:len() > 50 and "..." or "") .. "\""; 
+    elseif t == "number" then return "Number: " .. tostring(value)
+    elseif t == "boolean" then return "Boolean: " .. tostring(value)
+    elseif t == "nil" then return "Nil"
+    else return t .. ": " .. tostring(value) end
 end
 
-local function DeepCopy(original)
-    local copy = {}
-    for k, v in pairs(original) do
-        if type(v) == "table" then
-            copy[k] = DeepCopy(v)
-        else
-            copy[k] = v
+local function SerializeValue(value, indent)
+    indent = indent or 0; local spaces = string.rep("  ", indent); local t = type(value)
+    if t == "nil" then return "nil"
+    elseif t == "boolean" or t == "number" then return tostring(value)
+    elseif t == "string" then return string.format("%q", value)
+    elseif t == "function" then local info = debug.getinfo(value, "nS"); return string.format("-- Function: %s [%s:%d]", info.name or "anonymous", info.short_src or "?", info.linedefined or 0)
+    elseif t == "table" then
+        local result = "{\n"; local count = 0
+        for k, v in pairs(value) do
+            if count < 50 then
+                local keyStr = type(k) == "string" and string.format("[%q]", k) or "[" .. tostring(k) .. "]"
+                result = result .. spaces .. "  " .. keyStr .. " = " .. SerializeValue(v, indent + 1) .. ",\n"; count = count + 1
+            else result = result .. spaces .. "  -- ... (truncated)\n"; break end
         end
-    end
-    return copy
+        return result .. spaces .. "}"
+    else return tostring(value) end
 end
 
-local function GetScriptPath(obj)
-    local path = obj.Name
-    local parent = obj.Parent
-    while parent and parent ~= game do
-        path = parent.Name .. "." .. path
-        parent = parent.Parent
+local function SearchUpvalues(func, depth, maxDepth, visited)
+    if depth > maxDepth or isScanning == false then return end
+    if not func or type(func) ~= "function" then return end
+    visited = visited or {}; if visited[func] then return end; visited[func] = true
+    local upvalues, i = {}, 1
+    while true do
+        local name, value = debug.getupvalue(func, i); if not name then break end
+        upvalues[name] = {value = value, type = type(value), index = i}
+        if type(value) == "function" and depth < maxDepth then
+            local nested = SearchUpvalues(value, depth + 1, maxDepth, visited)
+            if next(nested) then upvalues[name .. " (nested)"] = nested end
+        end
+        i = i + 1
     end
-    return path
+    if next(upvalues) then
+        table.insert(scannedFunctions, {func = func, name = debug.getinfo(func, "n").name or "anonymous", source = debug.getinfo(func, "S").short_src or "unknown", line = debug.getinfo(func, "S").linedefined or 0, upvalues = upvalues, depth = depth})
+    end
+    SafeGC()
 end
 
--- Deep upvalue searcher with optimization
-local function FindUpvaluesDeep(func, depth, maxDepth)
-    depth = depth or 0
-    maxDepth = maxDepth or 10
-    
-    if depth > maxDepth or type(func) ~= "function" then
-        return {}
+local function ScanAllFunctions(maxDepth)
+    if isScanning then return end; isScanning = true; scannedFunctions = {}; local startTime = tick()
+    RayfieldLib:Notify({Title = "Scanning Started", Content = "Searching for functions with upvalues...", Duration = 3})
+    for k, v in pairs(_G) do if type(v) == "function" then SearchUpvalues(v, 1, maxDepth or CONFIG.MaxDepth) end end
+    for k, v in pairs(package.loaded) do
+        if type(v) == "table" then for kk, vv in pairs(v) do if type(vv) == "function" then SearchUpvalues(vv, 1, maxDepth or CONFIG.MaxDepth) end end
+        elseif type(v) == "function" then SearchUpvalues(v, 1, maxDepth or CONFIG.MaxDepth) end
     end
-    
-    local upvalues = {}
-    local success, info = pcall(debug.getinfo, func, "u")
-    
-    if not success then
-        return upvalues
-    end
-    
-    for i = 1, (info.nups or 0) do
-        local success, name, value = pcall(function()
-            local n = debug.getupvalue(func, i)
-            return n, (type(n) ~= nil and select(2, debug.getupvalue(func, i)) or nil)
-        end)
-        
-        if success and name then
-            table.insert(upvalues, {
-                name = name,
-                value = value,
-                index = i,
-                type = type(value),
-                depth = depth
-            })
-            
-            -- Recursive search for nested functions
-            if type(value) == "function" and depth < maxDepth then
-                local nested = FindUpvaluesDeep(value, depth + 1, maxDepth)
-                for _, nestedUpvalue in ipairs(nested) do
-                    nestedUpvalue.parent = name
-                    table.insert(upvalues, nestedUpvalue)
-                end
-            end
-        end
-    end
-    
-    return upvalues
+    local endTime = tick(); isScanning = false
+    RayfieldLib:Notify({Title = "Scan Complete", Content = string.format("Found %d functions in %.2f seconds", #scannedFunctions, endTime - startTime), Duration = 5})
+    UpdateFunctionList()
 end
 
--- Optimized function finder with lazy loading
-local function FindFunctionsInObject(obj, found, searched)
-    found = found or {}
-    searched = searched or setmetatable({}, {__mode = "k"})
-    
-    if searched[obj] or #found >= OptimizationSettings.MaxCachedItems then
-        return found
-    end
-    
-    searched[obj] = true
-    
-    local success, result = pcall(function()
-        for k, v in pairs(obj) do
-            if type(v) == "function" then
-                table.insert(found, {
-                    object = obj,
-                    key = k,
-                    path = GetScriptPath(obj) .. "." .. tostring(k),
-                    func = v
-                })
-            elseif type(v) == "table" and not v:IsA("Instance") then
-                FindFunctionsInObject(v, found, searched)
-            end
+MainTab:CreateSection("Function Scanner")
+MainTab:CreateTextbox({Text = "Search functions...", PlaceholderText = "Type to filter...", RemoveFocusAfterEdited = true, Callback = function(Value) UpdateFunctionList(Value) end})
+MainTab:CreateButton({Text = "Scan All Functions", Callback = function() ScanAllFunctions(CONFIG.MaxDepth) end})
+MainTab:CreateSlider({Name = "Search Depth", Range = {1, 20}, Increment = 1, Current = CONFIG.MaxDepth, Callback = function(Value) CONFIG.MaxDepth = Value end})
+
+local FunctionDropdown = MainTab:CreateDropdown({Name = "Select Function", Options = {}, CurrentOption = {}, MultipleOptions = false, Flag = "FunctionSelector", Callback = function(Value)
+    if Value and #Value > 0 then
+        local funcName = Value[1]
+        for _, funcData in ipairs(scannedFunctions) do
+            local displayName = string.format("%s [%s:%d]", funcData.name, funcData.source, funcData.line)
+            if displayName == funcName then selectedFunction = funcData; UpdateInspector(funcData); break end
         end
-    end)
-    
-    return found
+    end
+end})
+
+MainTab:CreateSection("Function Inspector")
+local InspectorLabel = MainTab:CreateLabel("No function selected")
+local UpvalueCountLabel = MainTab:CreateLabel("Upvalues: 0")
+
+MainTab:CreateSection("Upvalue Editor")
+local UpvalueDropdown = MainTab:CreateDropdown({Name = "Select Upvalue", Options = {}, CurrentOption = {}, MultipleOptions = false, Flag = "UpvalueSelector", Callback = function(Value)
+    if Value and #Value > 0 and selectedFunction then
+        local upvalueName = Value[1]; local actualName = upvalueName:gsub(" %(nested%)$", "")
+        local upvalueData = selectedFunction.upvalues[actualName]; if upvalueData then UpdateEditor(upvalueData, actualName) end
+    end
+end})
+
+local EditBox = MainTab:CreateTextbox({Text = "New Value (Lua syntax)", PlaceholderText = [[e.g., "hello", 42, true, {key=value}]], RemoveFocusAfterEdited = false, Callback = function(Value) clipboardBuffer = Value end})
+
+MainTab:CreateButton({Text = "Apply Changes", Callback = function()
+    if not selectedFunction then RayfieldLib:Notify({Title = "Error", Content = "No function selected", Duration = 3}); return end
+    local upvalueName = UpvalueDropdown.CurrentOption[1]; if not upvalueName then RayfieldLib:Notify({Title = "Error", Content = "No upvalue selected", Duration = 3}); return end
+    local actualName = upvalueName:gsub(" %(nested%)$", ""); local upvalueData = selectedFunction.upvalues[actualName]
+    if not upvalueData then RayfieldLib:Notify({Title = "Error", Content = "Upvalue not found", Duration = 3}); return end
+    local newValueStr = EditBox.Text; local success, newValue = pcall(loadstring("return " .. newValueStr))
+    if not success then RayfieldLib:Notify({Title = "Error", Content = "Invalid Lua syntax: " .. tostring(newValue), Duration = 5}); return end
+    local setResult, setResultErr = pcall(debug.setupvalue, selectedFunction.func, upvalueData.index, newValue)
+    if setResult then
+        local verifyName, verifyValue = debug.getupvalue(selectedFunction.func, upvalueData.index)
+        if verifyValue == newValue then RayfieldLib:Notify({Title = "Success", Content = "Upvalue updated successfully!", Duration = 3}); UpdateInspector(selectedFunction)
+        else RayfieldLib:Notify({Title = "Warning", Content = "Change applied but verification failed", Duration = 3}) end
+    else RayfieldLib:Notify({Title = "Error", Content = "Failed to set upvalue: " .. tostring(setResultErr), Duration = 5}) end
+end})
+
+MainTab:CreateSection("Code Spy")
+MainTab:CreateButton({Text = "View Function Code", Callback = function()
+    if not selectedFunction then RayfieldLib:Notify({Title = "Error", Content = "No function selected", Duration = 3}); return end
+    ShowCodeInSpyTab(selectedFunction); Window:SelectTab(CodeSpyTab)
+end})
+MainTab:CreateButton({Text = "Copy Code to Clipboard", Callback = function()
+    if not selectedFunction then RayfieldLib:Notify({Title = "Error", Content = "No function selected", Duration = 3}); return end
+    local code = ExtractFunctionCode(selectedFunction); clipboardBuffer = code
+    RayfieldLib:Notify({Title = "Copied", Content = "Function code copied to buffer", Duration = 3})
+end})
+
+ExportTab:CreateSection("Script Generator")
+local GenerateTypeDropdown = ExportTab:CreateDropdown({Name = "Export Type", Options = {"Full Script", "Upvalue Changes Only", "Function Analysis"}, CurrentOption = {}, MultipleOptions = false, Flag = "ExportType", Callback = function(Value) end})
+ExportTab:CreateButton({Text = "Generate Script", Callback = function() GenerateScript() end})
+local GeneratedCodeBox = ExportTab:CreateTextbox({Text = "Generated Script", PlaceholderText = "Generated code will appear here...", RemoveFocusAfterEdited = false, Callback = function(Value) clipboardBuffer = Value end})
+ExportTab:CreateButton({Text = "Copy Generated Script", Callback = function()
+    if GeneratedCodeBox.Text and GeneratedCodeBox.Text:len() > 0 then clipboardBuffer = GeneratedCodeBox.Text; RayfieldLib:Notify({Title = "Copied", Content = "Generated script copied to buffer", Duration = 3})
+    else RayfieldLib:Notify({Title = "Error", Content = "No generated script to copy", Duration = 3}) end
+end})
+
+MainTab:CreateSection("Performance")
+local CacheInfoLabel = MainTab:CreateLabel("Cache: 0 / " .. CONFIG.CacheLimit)
+local MemoryLabel = MainTab:CreateLabel("Memory: Calculating...")
+MainTab:CreateButton({Text = "Clear Cache", Callback = function() cache = {}; cacheCount = 0; collectgarbage("count"); UpdatePerformanceLabels(); RayfieldLib:Notify({Title = "Cache Cleared", Content = "Memory optimized", Duration = 3}) end})
+MainTab:CreateButton({Text = "Force Garbage Collection", Callback = function() collectgarbage("collect"); UpdatePerformanceLabels(); RayfieldLib:Notify({Title = "GC Done", Content = "Garbage collection forced", Duration = 3}) end})
+
+function UpdateFunctionList(filter)
+    local options = {}
+    for _, funcData in ipairs(scannedFunctions) do
+        local displayName = string.format("%s [%s:%d]", funcData.name, funcData.source, funcData.line)
+        if not filter or displayName:lower():find(filter:lower()) then table.insert(options, displayName) end
+    end
+    FunctionDropdown:SetOptions(options)
 end
 
--- Real upvalue editor with validation
-local function EditUpvalue(func, upvalueIndex, newValue)
-    local success, err = pcall(function()
-        local upvalueName = debug.getupvalue(func, upvalueIndex)
-        if not upvalueName then
-            error("Invalid upvalue index")
-        end
-        
-        debug.setupvalue(func, upvalueIndex, newValue)
-        
-        local verifyValue = select(2, debug.getupvalue(func, upvalueIndex))
-        if verifyValue ~= newValue then
-            error("Failed to set upvalue")
-        end
-    end)
-    
-    return success, err
+function UpdateInspector(funcData)
+    if not funcData then return end
+    local infoText = string.format("Function: %s\nSource: %s\nLine: %d\nDepth: %d", funcData.name, funcData.source, funcData.line, funcData.depth)
+    InspectorLabel:SetText(infoText)
+    local upvalueCount = 0; for _ in pairs(funcData.upvalues) do upvalueCount = upvalueCount + 1 end
+    UpvalueCountLabel:SetText("Upvalues: " .. upvalueCount)
+    local upvalueOptions = {}
+    for name, data in pairs(funcData.upvalues) do if type(data) == "table" and data.value ~= nil then table.insert(upvalueOptions, name .. " (" .. GetTypeString(data.value) .. ")") end end
+    UpvalueDropdown:SetOptions(upvalueOptions)
 end
 
--- Code snippet viewer with syntax highlighting preparation
-local function GetFunctionCode(func)
-    local info = debug.getinfo(func, "Snl")
-    if not info then
-        return "No information available"
-    end
-    
-    local code = string.format("-- Function: %s\n", info.name or "anonymous")
-    code = code .. string.format("-- Source: %s\n", info.source or "unknown")
-    code = code .. string.format("-- Line: %d-%d\n", info.linedefined or 0, info.lastlinedefined or 0)
-    
-    if info.source and info.source:sub(1, 1) == "@" then
-        local filePath = info.source:sub(2)
-        local file = io.open(filePath, "r")
-        if file then
-            local lines = {}
-            for i = info.linedefined, info.lastlinedefined do
-                file:seek("set", 0)
-                local lineNum = 1
-                for line in file:lines() do
-                    if lineNum == i then
-                        table.insert(lines, string.format("%d: %s", lineNum, line))
-                    end
-                    lineNum = lineNum + 1
-                end
-            end
-            file:close()
-            code = code .. "\n" .. table.concat(lines, "\n")
-        end
-    end
-    
+function UpdateEditor(upvalueData, name) if not upvalueData then return end; EditBox:SetText(SerializeValue(upvalueData.value, 0)) end
+
+function ExtractFunctionCode(funcData)
+    local func = funcData.func; local info = debug.getinfo(func, "Sln")
+    if not info then return "-- No debug info available" end
+    local code = "-- Function: " .. (info.name or "anonymous") .. "\n-- Source: " .. (info.short_src or "unknown") .. "\n-- Line: " .. (info.linedefined or "?") .. "\n-- Upvalues:\n"
+    for name, data in pairs(funcData.upvalues) do if type(data) == "table" and data.value ~= nil then code = code .. "--   " .. name .. " = " .. SerializeValue(data.value, 0) .. "\n" end end
+    code = code .. "\n"
+    if info.source and info.source:sub(1, 1) == "@" then local fileName = info.source:sub(2); code = code .. "-- Source file: " .. fileName .. "\n-- (Full source extraction limited by Roblox security)\n" end
+    local dumpInfo = debug.getinfo(func, "u")
+    if dumpInfo then code = code .. "\n-- Stats: " .. dumpInfo.numparams .. " params, " .. (dumpInfo.isvararg and "vararg" or "fixed args") .. "\n" end
     return code
 end
 
--- Create main window
-local Window = Rayfield:CreateWindow({
-    Name = "Optimized Upvalue Editor",
-    LoadingTitle = "Rayfield Interface",
-    LoadingSubtitle = "by Sirius",
-    ConfigurationSaving = {
-        Enabled = true,
-        FolderName = "UpvalueEditor",
-        FileName = "Config"
-    },
-    Discord = {
-        Enabled = false,
-    }
-})
+function ShowCodeInSpyTab(funcData)
+    local code = ExtractFunctionCode(funcData); CodeSpyTab:ClearAllElements()
+    CodeSpyTab:CreateSection("Function Code Viewer"):CreateLabel(code)
+    CodeSpyTab:CreateButton({Text = "Copy This Code", Callback = function() clipboardBuffer = code; RayfieldLib:Notify({Title = "Copied", Content = "Code copied to buffer", Duration = 3}) end})
+end
 
--- Main section
-local MainSection = Window:CreateSection("Main Controls")
+function UpdatePerformanceLabels() CacheInfoLabel:SetText("Cache: " .. cacheCount .. " / " .. CONFIG.CacheLimit); local mem = collectgarbage("count"); MemoryLabel:SetText(string.format("Memory: %.2f KB", mem)) end
 
--- Script scanner
-Window:CreateButton({
-    Name = "Scan All Functions",
-    Callback = function()
-        if OptimizationSettings.Debounce then return end
-        OptimizationSettings.Debounce = true
-        
-        local scanTime = tick()
-        Cache.Functions = {}
-        Cache.Scripts = {}
-        
-        -- Scan game services
-        local services = {
-            ReplicatedStorage = game:GetService("ReplicatedStorage"),
-            StarterGui = game:GetService("StarterGui"),
-            StarterPack = game:GetService("StarterPack"),
-            Lighting = game:GetService("Lighting")
-        }
-        
-        for _, service in pairs(services) do
-            local funcs = FindFunctionsInObject(service)
-            for _, f in ipairs(funcs) do
-                table.insert(Cache.Functions, f)
-            end
-        end
-        
-        -- Scan local player scripts
-        for _, child in ipairs(LocalPlayer:GetDescendants()) do
-            if child:IsA("LocalScript") or child:IsA("ModuleScript") then
-                table.insert(Cache.Scripts, {
-                    instance = child,
-                    path = GetScriptPath(child)
-                })
-            end
-        end
-        
-        print(string.format("Scan completed in %.2f seconds. Found %d functions.", 
-            tick() - scanTime, #Cache.Functions))
-        
-        OptimizationSettings.Debounce = false
+function GenerateScript()
+    local exportType = GenerateTypeDropdown.CurrentOption[1]
+    if not exportType then RayfieldLib:Notify({Title = "Error", Content = "Select export type", Duration = 3}); return end
+    local script = "-- Generated by Rayfield Upvalue Editor\n-- Date: " .. os.date() .. "\n\n"
+    if exportType == "Full Script" then
+        script = script .. "-- Full analysis of selected function\n"
+        if selectedFunction then script = script .. ExtractFunctionCode(selectedFunction) .. "\n\n-- Upvalue modification template\nlocal function ModifyUpvalues()\n    -- Add your debug.setupvalue calls here\n    -- Example:\n    -- debug.setupvalue(targetFunc, index, newValue)\nend\n"
+        else script = script .. "-- No function selected for full export\n" end
+    elseif exportType == "Upvalue Changes Only" then
+        script = script .. "-- Upvalue changes only\nlocal function ApplyChanges()\n"
+        if selectedFunction then for name, data in pairs(selectedFunction.upvalues) do if type(data) == "table" and data.value ~= nil then script = script .. "    -- Upvalue: " .. name .. "\n    -- Current: " .. SerializeValue(data.value, 0) .. "\n    -- debug.setupvalue(targetFunc, " .. data.index .. ", newValue)\n\n" end end
+        else script = script .. "    -- No function selected\n" end
+        script = script .. "end\n"
+    elseif exportType == "Function Analysis" then
+        script = script .. "-- Function Analysis Report\nlocal Analysis = {\n    TotalFunctions = " .. #scannedFunctions .. ",\n    Functions = {\n"
+        for i, funcData in ipairs(scannedFunctions) do if i <= 20 then script = script .. "        {\n            Name = \"".. (funcData.name or "anonymous") .. "\",\n            Source = \"".. funcData.source .. "\",\n            Line = " .. funcData.line .. ",\n            Depth = " .. funcData.depth .. "\n        },\n" end end
+        script = script .. "    }\n}\n"
     end
-})
+    GeneratedCodeBox:SetText(script); RayfieldLib:Notify({Title = "Generated", Content = "Script generated successfully", Duration = 3})
+end
 
--- Search section
-local SearchSection = Window:CreateSection("Search & Filter")
-
-local searchTerm = ""
-Window:CreateTextbox({
-    Name = "Search Functions",
-    Placeholder = "Enter function name or path...",
-    Callback = function(value)
-        searchTerm = value:lower()
-    end
-})
-
--- Results display
-local ResultsSection = Window:CreateSection("Results")
-
-local selectedFunction = nil
-local selectedUpvalues = {}
-
-Window:CreateLabel({
-    Name = "Status",
-    Value = "Ready - Click 'Scan All Functions' to begin"
-})
-
--- Function inspector section
-local InspectorSection = Window:CreateSection("Function Inspector")
-
-Window:CreateButton({
-    Name = "Inspect Selected Function",
-    Callback = function()
-        if not selectedFunction then
-            print("No function selected")
-            return
-        end
-        
-        selectedUpvalues = FindUpvaluesDeep(selectedFunction.func, 0, 15)
-        print(string.format("Found %d upvalues", #selectedUpvalues))
-    end
-})
-
-Window:CreateLabel({
-    Name = "Selected Function",
-    Value = "None"
-})
-
-Window:CreateLabel({
-    Name = "Upvalue Count",
-    Value = "0"
-})
-
--- Upvalue editor section
-local UpvalueEditorSection = Window:CreateSection("Upvalue Editor")
-
--- Dynamic dropdown for upvalues
-Window:CreateDropdown({
-    Name = "Select Upvalue",
-    Options = {"None"},
-    CurrentOption = {"None"},
-    MultipleOptions = false,
-    Flag = "UpvalueSelector",
-    Callback = function(option)
-        if option[1] == "None" or #selectedUpvalues == 0 then
-            return
-        end
-        
-        local index = tonumber(option[1]:match("(%d+)"))
-        if index and selectedUpvalues[index] then
-            local upvalue = selectedUpvalues[index]
-            print(string.format("Selected: %s (Type: %s, Depth: %d)", 
-                upvalue.name, upvalue.type, upvalue.depth))
-        end
-    end
-})
-
--- Value editor textbox
-Window:CreateTextbox({
-    Name = "New Value",
-    Placeholder = "Enter new value...",
-    Callback = function(value)
-        -- Value will be processed on button click
-    end
-})
-
-Window:CreateButton({
-    Name = "Apply Upvalue Change",
-    Callback = function()
-        print("Upvalue change applied")
-    end
-})
-
--- Code spy section
-local CodeSpySection = Window:CreateSection("Code Spy")
-
-Window:CreateButton({
-    Name = "View Function Code",
-    Callback = function()
-        if not selectedFunction then
-            print("No function selected")
-            return
-        end
-        
-        local code = GetFunctionCode(selectedFunction.func)
-        print(code)
-    end
-})
-
-Window:CreateTextbox({
-    Name = "Code Viewer",
-    Placeholder = "Function code will appear here...",
-    Callback = function(value)
-        -- Read-only display
-    end
-})
-
--- Deep search section
-local DeepSearchSection = Window:CreateSection("Deep Search")
-
-Window:CreateSlider({
-    Name = "Search Depth",
-    Range = {1, 20},
-    Increment = 1,
-    Current = 10,
-    Flag = "SearchDepth",
-    Callback = function(value)
-        print(string.format("Search depth set to: %d", value))
-    end
-})
-
-Window:CreateToggle({
-    Name = "Enable Recursive Search",
-    Current = true,
-    Flag = "RecursiveSearch",
-    Callback = function(value)
-        print(string.format("Recursive search: %s", value and "Enabled" or "Disabled"))
-    end
-})
-
-Window:CreateButton({
-    Name = "Deep Scan Selected",
-    Callback = function()
-        if not selectedFunction then
-            print("No function selected")
-            return
-        end
-        
-        local depth = 10 -- Will get from slider
-        local startTime = tick()
-        
-        selectedUpvalues = FindUpvaluesDeep(selectedFunction.func, 0, depth)
-        
-        print(string.format("Deep scan completed in %.3f seconds", tick() - startTime))
-        print(string.format("Found %d upvalues at depth %d", #selectedUpvalues, depth))
-    end
-})
-
--- Performance monitoring
-local PerformanceSection = Window:CreateSection("Performance")
-
-Window:CreateLabel({
-    Name = "Cached Functions",
-    Value = "0"
-})
-
-Window:CreateLabel({
-    Name = "Memory Usage",
-    Value = "Calculating..."
-})
-
-Window:CreateButton({
-    Name = "Clear Cache",
-    Callback = function()
-        Cache.Functions = {}
-        Cache.Upvalues = {}
-        Cache.Scripts = {}
-        collectgarbage("collect")
-        print("Cache cleared")
-    end
-})
-
-Window:CreateToggle({
-    Name = "Auto-Refresh",
-    Current = false,
-    Flag = "AutoRefresh",
-    Callback = function(value)
-        if value then
-            spawn(function()
-                while task.wait(OptimizationSettings.RefreshRate) do
-                    if not OptimizationSettings.AutoRefreshEnabled then break end
-                    -- Update performance stats
-                    pcall(function()
-                        collectgarbage("step")
-                    end)
-                end
-            end)
-        end
-        OptimizationSettings.AutoRefreshEnabled = value
-    end
-})
-
--- Quick actions
-local QuickActionsSection = Window:CreateSection("Quick Actions")
-
-Window:CreateButton({
-    Name = "Find All Tables",
-    Callback = function()
-        local count = 0
-        for _, func in ipairs(Cache.Functions) do
-            local upvalues = FindUpvaluesDeep(func.func, 0, 5)
-            for _, upvalue in ipairs(upvalues) do
-                if upvalue.type == "table" then
-                    count = count + 1
-                end
-            end
-        end
-        print(string.format("Found %d table upvalues", count))
-    end
-})
-
-Window:CreateButton({
-    Name = "Find All Functions",
-    Callback = function()
-        local count = 0
-        for _, func in ipairs(Cache.Functions) do
-            local upvalues = FindUpvaluesDeep(func.func, 0, 5)
-            for _, upvalue in ipairs(upvalues) do
-                if upvalue.type == "function" then
-                    count = count + 1
-                end
-            end
-        end
-        print(string.format("Found %d function upvalues", count))
-    end
-})
-
-Window:CreateButton({
-    Name = "Export Analysis",
-    Callback = function()
-        local export = {
-            timestamp = os.time(),
-            functions = #Cache.Functions,
-            scripts = #Cache.Scripts,
-            upvalues = #selectedUpvalues
-        }
-        print(game:GetService("HttpService"):JSONEncode(export))
-    end
-})
-
--- Advanced section
-local AdvancedSection = Window:CreateSection("Advanced")
-
-Window:CreateToggle({
-    Name = "Show Hidden Upvalues",
-    Current = false,
-    Flag = "ShowHidden",
-    Callback = function(value)
-        print(string.format("Show hidden upvalues: %s", value and "Enabled" or "Disabled"))
-    end
-})
-
-Window:CreateToggle({
-    Name = "Verbose Logging",
-    Current = false,
-    Flag = "VerboseLog",
-    Callback = function(value)
-        print(string.format("Verbose logging: %s", value and "Enabled" or "Disabled"))
-    end
-})
-
-Window:CreateButton({
-    Name = "Force Garbage Collection",
-    Callback = function()
-        local before = collectgarbage("count")
-        collectgarbage("collect")
-        local after = collectgarbage("count")
-        print(string.format("GC: Freed %.2f KB", before - after))
-    end
-})
-
--- Initialize
-print("Rayfield Upvalue Editor loaded successfully!")
-print("Features:")
-print("  - Optimized deep upvalue searching")
-print("  - Real-time upvalue editing")
-print("  - Code spy functionality")
-print("  - Performance monitoring")
-print("  - No lag architecture")
-print("\nClick 'Scan All Functions' to begin!")
-
-return {
-    Cache = Cache,
-    FindUpvaluesDeep = FindUpvaluesDeep,
-    EditUpvalue = EditUpvalue,
-    GetFunctionCode = GetFunctionCode,
-    FindFunctionsInObject = FindFunctionsInObject
-}
+UpdatePerformanceLabels()
+spawn(function() while true do wait(5); UpdatePerformanceLabels(); SafeGC() end end)
+RayfieldLib:Notify({Title = "Ready", Content = "Upvalue Editor loaded. Click 'Scan All Functions' to begin.", Duration = 5})
