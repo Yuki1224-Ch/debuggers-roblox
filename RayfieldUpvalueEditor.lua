@@ -1,9 +1,39 @@
 -- ============================================================================
--- RAYFIELD OPTIMIZED UPVALUE EDITOR & CODE SPY (V2.0)
+-- RAYFIELD OPTIMIZED UPVALUE EDITOR & CODE SPY (V2.1 - UNIVERSAL SUPPORT)
 -- Features: Deep Search, Real Editing, Code Spy, Copy/Export, No-Lag Architecture
+-- Supports ALL games with automatic Rayfield loading and fallbacks
 -- ============================================================================
 
-local RayfieldLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/RayfieldMain/RayfieldLibrary/main/source.lua"))()
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+-- Universal Rayfield Loader with Multiple Fallbacks for All Games
+local function LoadRayfieldUniversal()
+    local sources = {
+        "https://sirius.menu/rayfield",
+        "https://raw.githubusercontent.com/RayfieldUI/Rayfield/main/source.lua",
+        "https://raw.githubusercontent.com/RayfieldMain/RayfieldLibrary/main/source.lua",
+        "https://rayfieldui.github.io/Rayfield/source.lua"
+    }
+    
+    for i, url in ipairs(sources) do
+        local success, result = pcall(function()
+            return loadstring(game:HttpGet(url))()
+        end)
+        if success and result then
+            if i > 1 then warn("[Rayfield Upvalue Editor] Loaded from fallback source " .. i .. ": " .. url) end
+            return result
+        end
+        warn("[Rayfield Upvalue Editor] Failed to load from source " .. i .. ": " .. url)
+    end
+    
+    error("[Rayfield Upvalue Editor] CRITICAL: Could not load Rayfield from any source. Check your internet connection or executor HTTP support.")
+    return nil
+end
+
+local RayfieldLib = LoadRayfieldUniversal()
+if not RayfieldLib then return end
 local Window = RayfieldLib:CreateWindow({
     Name = "Upvalue Editor & Code Spy",
     LoadingTitle = "Rayfield Tools",
